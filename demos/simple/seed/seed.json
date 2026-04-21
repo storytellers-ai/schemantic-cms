@@ -1,0 +1,119 @@
+{
+	"$schema": "https://emdashcms.com/seed.schema.json",
+	"version": "1",
+	"meta": {
+		"name": "Schemantic Docs",
+		"description": "A headless documentation site powered by EmDash",
+		"author": "Schemantic"
+	},
+
+	"settings": {
+		"title": "Schemantic Docs",
+		"tagline": "Documentation powered by EmDash"
+	},
+
+	"collections": [
+		{
+			"slug": "docs",
+			"label": "Docs",
+			"labelSingular": "Doc",
+			"supports": ["drafts", "revisions", "search", "seo"],
+			"fields": [
+				{
+					"slug": "title",
+					"label": "Title",
+					"type": "string",
+					"required": true,
+					"searchable": true
+				},
+				{
+					"slug": "description",
+					"label": "Description",
+					"type": "text",
+					"searchable": true
+				},
+				{
+					"slug": "order",
+					"label": "Sidebar Order",
+					"type": "integer"
+				},
+				{
+					"slug": "content",
+					"label": "Content",
+					"type": "portableText",
+					"searchable": true
+				}
+			]
+		}
+	],
+
+	"taxonomies": [
+		{
+			"name": "section",
+			"label": "Sections",
+			"labelSingular": "Section",
+			"hierarchical": true,
+			"collections": ["docs"],
+			"terms": [
+				{ "slug": "getting-started", "label": "Getting Started" },
+				{ "slug": "guides", "label": "Guides" },
+				{ "slug": "reference", "label": "Reference" }
+			]
+		}
+	],
+
+	"content": {
+		"docs": [
+			{
+				"id": "doc-introduction",
+				"slug": "introduction",
+				"status": "published",
+				"data": {
+					"title": "Introduction",
+					"description": "Welcome to the documentation.",
+					"order": 1,
+					"content": [
+						{
+							"_type": "block",
+							"style": "normal",
+							"children": [
+								{
+									"_type": "span",
+									"text": "This is a headless documentation CMS. Content is managed in the admin panel and served via API to any frontend."
+								}
+							]
+						}
+					]
+				},
+				"taxonomies": {
+					"section": ["getting-started"]
+				}
+			},
+			{
+				"id": "doc-quickstart",
+				"slug": "quickstart",
+				"status": "published",
+				"data": {
+					"title": "Quickstart",
+					"description": "Get up and running in minutes.",
+					"order": 2,
+					"content": [
+						{
+							"_type": "block",
+							"style": "normal",
+							"children": [
+								{
+									"_type": "span",
+									"text": "Sign in to the admin panel and create your first doc page. Query the content from any frontend via the EmDash API."
+								}
+							]
+						}
+					]
+				},
+				"taxonomies": {
+					"section": ["getting-started"]
+				}
+			}
+		]
+	}
+}

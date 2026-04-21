@@ -1,0 +1,32 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "schemantic-docs",
+	"main": "./src/worker.ts",
+	"compatibility_date": "2026-01-14",
+	// disable_nodejs_process_v2 needed until unenv fix lands in Pages
+	// See: https://github.com/withastro/astro/issues/14511
+	"compatibility_flags": ["nodejs_compat", "disable_nodejs_process_v2"],
+	"routes": [
+		{
+			"pattern": "cms.schemantic.io",
+			"zone_name": "schemantic.io",
+			"custom_domain": true
+		}
+	],
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "schemantic-docs",
+			"database_id": "6f0587ed-1c8f-4782-add6-b852aefd2f2e"
+		}
+	],
+	"r2_buckets": [
+		{
+			"binding": "MEDIA",
+			"bucket_name": "schemantic-docs-media"
+		}
+	],
+	"observability": {
+		"enabled": true
+	}
+}
