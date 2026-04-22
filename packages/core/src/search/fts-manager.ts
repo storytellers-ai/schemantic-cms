@@ -102,10 +102,20 @@ export class FTSManager {
 	/**
 	 * Create triggers to keep FTS table in sync with content table.
 	 *
-	 * The insert and update triggers only add rows to the FTS index when
-	 * `deleted_at IS NULL`. This keeps soft-deleted content out of the
-	 * search index and ensures the FTS row count matches the non-deleted
-	 * content count (which `verifyAndRepairIndex` relies on).
+	 * The insert trigger only indexes rows where `deleted_at IS NULL`, so
+	 * soft-deleted content is not present in the FTS index.
+	 *
+	 * These are external-content FTS5 tables (content='<contentTable>'),
+	 * so removal must use the special `INSERT ... VALUES('delete', ...)`
+	 * command form. A plain `DELETE FROM fts_tbl WHERE rowid = ?` does not
+	 * remove index entries for external-content tables and corrupts the
+	 * shadow tables, producing `SQLITE_CORRUPT_VTAB` on later writes.
+	 *
+	 * The update case is split into two triggers to avoid a related
+	 * corruption: issuing the `'delete'` command for a row that was never
+	 * inserted into the FTS index (because OLD.deleted_at was not NULL)
+	 * also corrupts the shadow tables. The triggers use WHEN clauses to
+	 * only run the delete when there is actually an entry to remove.
 	 */
 	private async createTriggers(collectionSlug: string, searchableFields: string[]): Promise<void> {
 		this.validateInputs(collectionSlug, searchableFields);
@@ -113,11 +123,12 @@ export class FTSManager {
 		const contentTable = this.getContentTableName(collectionSlug);
 		const fieldList = searchableFields.join(", ");
 		const newFieldList = searchableFields.map((f) => `NEW.${f}`).join(", ");
+		const oldFieldList = searchableFields.map((f) => `OLD.${f}`).join(", ");
 		// Insert trigger - only index non-deleted content
 		await sql
 			.raw(`
-			CREATE TRIGGER IF NOT EXISTS "${ftsTable}_insert" 
-			AFTER INSERT ON "${contentTable}" 
+			CREATE TRIGGER IF NOT EXISTS "${ftsTable}_insert"
+			AFTER INSERT ON "${contentTable}"
 			WHEN NEW.deleted_at IS NULL
 			BEGIN
 				INSERT INTO "${ftsTable}"(rowid, id, locale, ${fieldList})
@@ -126,15 +137,17 @@ export class FTSManager {
 		`)
 			.execute(this.db);
 
-		// Update trigger - always remove the old FTS row, only re-insert
-		// if the row is not soft-deleted. This handles both content edits
-		// and soft-delete operations (UPDATE SET deleted_at = ...).
+		// Update from an active (indexed) row. Remove the old FTS entry using
+		// the external-content delete command, then re-insert if the row is
+		// not soft-deleted. Covers edits and soft-deletes.
 		await sql
 			.raw(`
-			CREATE TRIGGER IF NOT EXISTS "${ftsTable}_update" 
-			AFTER UPDATE ON "${contentTable}" 
+			CREATE TRIGGER IF NOT EXISTS "${ftsTable}_update_active"
+			AFTER UPDATE ON "${contentTable}"
+			WHEN OLD.deleted_at IS NULL
 			BEGIN
-				DELETE FROM "${ftsTable}" WHERE rowid = OLD.rowid;
+				INSERT INTO "${ftsTable}"("${ftsTable}", rowid, id, locale, ${fieldList})
+				VALUES ('delete', OLD.rowid, OLD.id, OLD.locale, ${oldFieldList});
 				INSERT INTO "${ftsTable}"(rowid, id, locale, ${fieldList})
 				SELECT NEW.rowid, NEW.id, NEW.locale, ${newFieldList}
 				WHERE NEW.deleted_at IS NULL;
@@ -142,13 +155,34 @@ export class FTSManager {
 		`)
 			.execute(this.db);
 
-		// Delete trigger
+		// Update from a soft-deleted (unindexed) row being restored. No FTS
+		// entry exists to delete, so skip the 'delete' command (issuing it for
+		// a non-existent entry corrupts the shadow tables). Only insert if the
+		// row is now active.
 		await sql
 			.raw(`
-			CREATE TRIGGER IF NOT EXISTS "${ftsTable}_delete" 
-			AFTER DELETE ON "${contentTable}" 
+			CREATE TRIGGER IF NOT EXISTS "${ftsTable}_update_restore"
+			AFTER UPDATE ON "${contentTable}"
+			WHEN OLD.deleted_at IS NOT NULL AND NEW.deleted_at IS NULL
 			BEGIN
-				DELETE FROM "${ftsTable}" WHERE rowid = OLD.rowid;
+				INSERT INTO "${ftsTable}"(rowid, id, locale, ${fieldList})
+				VALUES (NEW.rowid, NEW.id, NEW.locale, ${newFieldList});
+			END
+		`)
+			.execute(this.db);
+
+		// Delete trigger - only remove from FTS if the row was actually
+		// indexed (deleted_at IS NULL at the time of delete). If it was
+		// already soft-deleted, no FTS entry exists and the 'delete' command
+		// would corrupt the shadow tables.
+		await sql
+			.raw(`
+			CREATE TRIGGER IF NOT EXISTS "${ftsTable}_delete"
+			AFTER DELETE ON "${contentTable}"
+			WHEN OLD.deleted_at IS NULL
+			BEGIN
+				INSERT INTO "${ftsTable}"("${ftsTable}", rowid, id, locale, ${fieldList})
+				VALUES ('delete', OLD.rowid, OLD.id, OLD.locale, ${oldFieldList});
 			END
 		`)
 			.execute(this.db);
@@ -162,7 +196,11 @@ export class FTSManager {
 		const ftsTable = this.getFtsTableName(collectionSlug);
 
 		await sql.raw(`DROP TRIGGER IF EXISTS "${ftsTable}_insert"`).execute(this.db);
+		// The legacy single update trigger plus the split variants used by the
+		// current fix. Drop all so rebuilds leave no stale triggers behind.
 		await sql.raw(`DROP TRIGGER IF EXISTS "${ftsTable}_update"`).execute(this.db);
+		await sql.raw(`DROP TRIGGER IF EXISTS "${ftsTable}_update_active"`).execute(this.db);
+		await sql.raw(`DROP TRIGGER IF EXISTS "${ftsTable}_update_restore"`).execute(this.db);
 		await sql.raw(`DROP TRIGGER IF EXISTS "${ftsTable}_delete"`).execute(this.db);
 	}
 
@@ -372,9 +410,39 @@ export class FTSManager {
 	}
 
 	/**
+	 * Check whether the existing update trigger uses a legacy pattern that
+	 * needs rebuilding. Two legacy shapes exist in the wild:
+	 *
+	 * 1. `DELETE FROM <fts> WHERE rowid = OLD.rowid` — corrupts external-content
+	 *    FTS5 shadow tables outright.
+	 * 2. The interim single-trigger fix using `INSERT INTO ... VALUES('delete', ...)`
+	 *    unconditionally — corrupts the shadow tables on soft-delete restore,
+	 *    because it issues the delete command for a row that was never indexed.
+	 *
+	 * Detection: the current fix uses two triggers named `_update_active` and
+	 * `_update_restore`. If the single legacy `_update` trigger still exists
+	 * (regardless of body), the index must be rebuilt.
+	 */
+	private async hasLegacyUpdateTrigger(collectionSlug: string): Promise<boolean> {
+		const ftsTable = this.getFtsTableName(collectionSlug);
+		const triggerName = `${ftsTable}_update`;
+
+		const result = await sql<{ name: string }>`
+			SELECT name FROM sqlite_master
+			WHERE type = 'trigger' AND name = ${triggerName}
+		`.execute(this.db);
+
+		return result.rows.length > 0;
+	}
+
+	/**
 	 * Verify FTS index integrity and rebuild if corrupted.
 	 *
-	 * Checks for row count mismatch between content table and FTS table.
+	 * Rebuilds when:
+	 * - the FTS table is missing
+	 * - the update trigger uses the legacy buggy `DELETE FROM <fts>` pattern
+	 *   (which silently corrupts external-content FTS5 shadow tables)
+	 * - the row count between the content and FTS tables drifts
 	 *
 	 * Returns true if the index was rebuilt, false if it was healthy.
 	 */
@@ -394,6 +462,19 @@ export class FTSManager {
 
 			console.warn(`FTS index for "${collectionSlug}" is missing. Rebuilding.`);
 			await this.rebuildIndex(collectionSlug, fields, config.weights);
+			return true;
+		}
+
+		// Check for legacy buggy trigger pattern that corrupts external-content
+		// FTS5 shadow tables. Forces a rebuild so new triggers get installed
+		// and the corrupted shadow tables are replaced.
+		if (await this.hasLegacyUpdateTrigger(collectionSlug)) {
+			console.warn(
+				`FTS index for "${collectionSlug}" has legacy update trigger. Rebuilding to fix shadow-table corruption.`,
+			);
+			if (fields.length > 0) {
+				await this.rebuildIndex(collectionSlug, fields, config?.weights);
+			}
 			return true;
 		}
 
@@ -418,8 +499,6 @@ export class FTSManager {
 			console.warn(
 				`FTS index for "${collectionSlug}" has ${ftsRows} rows but content table has ${contentRows}. Rebuilding.`,
 			);
-			const fields = await this.getSearchableFields(collectionSlug);
-			const config = await this.getSearchConfig(collectionSlug);
 			if (fields.length > 0) {
 				await this.rebuildIndex(collectionSlug, fields, config?.weights);
 			}
