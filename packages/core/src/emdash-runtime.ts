@@ -1633,6 +1633,7 @@ export class EmDashRuntime {
 			translationOf?: string;
 		},
 	) {
+		await this.ensureSearchHealthy();
 		// Run beforeSave hooks (trusted plugins)
 		let processedData = body.data;
 		if (this.hooks.hasHooks("content:beforeSave")) {
@@ -1676,6 +1677,7 @@ export class EmDashRuntime {
 			_rev?: string;
 		},
 	) {
+		await this.ensureSearchHealthy();
 		// Resolve slug → ID if needed (before any lookups)
 		const { ContentRepository } = await import("./database/repositories/content.js");
 		const repo = new ContentRepository(this.db);
@@ -1803,6 +1805,7 @@ export class EmDashRuntime {
 	}
 
 	async handleContentDelete(collection: string, id: string) {
+		await this.ensureSearchHealthy();
 		// Run beforeDelete hooks (trusted plugins)
 		if (this.hooks.hasHooks("content:beforeDelete")) {
 			const { allowed } = await this.hooks.runContentBeforeDelete(id, collection);
@@ -1852,10 +1855,12 @@ export class EmDashRuntime {
 	}
 
 	async handleContentRestore(collection: string, id: string) {
+		await this.ensureSearchHealthy();
 		return handleContentRestore(this.db, collection, id);
 	}
 
 	async handleContentPermanentDelete(collection: string, id: string) {
+		await this.ensureSearchHealthy();
 		const result = await handleContentPermanentDelete(this.db, collection, id);
 
 		// Run afterDelete hooks so plugins (e.g. AI Search) can clean up
@@ -1871,6 +1876,7 @@ export class EmDashRuntime {
 	}
 
 	async handleContentDuplicate(collection: string, id: string, authorId?: string) {
+		await this.ensureSearchHealthy();
 		return handleContentDuplicate(this.db, collection, id, authorId);
 	}
 
@@ -1879,6 +1885,7 @@ export class EmDashRuntime {
 	// =========================================================================
 
 	async handleContentPublish(collection: string, id: string) {
+		await this.ensureSearchHealthy();
 		const result = await handleContentPublish(this.db, collection, id);
 
 		// Run afterPublish hooks (fire-and-forget)
@@ -1890,6 +1897,7 @@ export class EmDashRuntime {
 	}
 
 	async handleContentUnpublish(collection: string, id: string) {
+		await this.ensureSearchHealthy();
 		const result = await handleContentUnpublish(this.db, collection, id);
 
 		// Run afterUnpublish hooks (fire-and-forget)
@@ -1901,10 +1909,12 @@ export class EmDashRuntime {
 	}
 
 	async handleContentSchedule(collection: string, id: string, scheduledAt: string) {
+		await this.ensureSearchHealthy();
 		return handleContentSchedule(this.db, collection, id, scheduledAt);
 	}
 
 	async handleContentUnschedule(collection: string, id: string) {
+		await this.ensureSearchHealthy();
 		return handleContentUnschedule(this.db, collection, id);
 	}
 
@@ -1913,6 +1923,7 @@ export class EmDashRuntime {
 	}
 
 	async handleContentDiscardDraft(collection: string, id: string) {
+		await this.ensureSearchHealthy();
 		return handleContentDiscardDraft(this.db, collection, id);
 	}
 

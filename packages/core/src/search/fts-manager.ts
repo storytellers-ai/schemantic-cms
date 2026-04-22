@@ -205,18 +205,55 @@ export class FTSManager {
 	}
 
 	/**
-	 * Drop the FTS table and triggers for a collection
+	 * Drop the FTS table and triggers for a collection.
+	 *
+	 * If the virtual table is corrupted (SQLITE_CORRUPT_VTAB on the shadow
+	 * tables), a normal `DROP TABLE` can fail. In that case we fall back to
+	 * dropping the shadow tables by name directly so a fresh FTS index can be
+	 * created.
 	 */
 	async dropFtsTable(collectionSlug: string): Promise<void> {
 		if (!isSqlite(this.db)) return;
 		this.validateInputs(collectionSlug);
 		const ftsTable = this.getFtsTableName(collectionSlug);
 
-		// Drop triggers first
+		// Drop triggers first (safe even if FTS is corrupt)
 		await this.dropTriggers(collectionSlug);
 
-		// Drop the FTS table
-		await sql.raw(`DROP TABLE IF EXISTS "${ftsTable}"`).execute(this.db);
+		try {
+			await sql.raw(`DROP TABLE IF EXISTS "${ftsTable}"`).execute(this.db);
+		} catch (error) {
+			console.warn(
+				`DROP TABLE failed for FTS index "${ftsTable}" (${
+					error instanceof Error ? error.message : String(error)
+				}); falling back to shadow-table cleanup.`,
+			);
+			await this.dropFtsShadowTables(collectionSlug);
+			// Try once more after shadow cleanup — on some SQLite builds the
+			// virtual-table entry in sqlite_master is still left behind.
+			await sql
+				.raw(`DROP TABLE IF EXISTS "${ftsTable}"`)
+				.execute(this.db)
+				.catch(() => {});
+		}
+	}
+
+	/**
+	 * Drop the FTS5 shadow tables for a collection by name. Used as a
+	 * fallback when the virtual table itself cannot be dropped because of
+	 * shadow-table corruption. FTS5 creates: _config, _data, _docsize, _idx
+	 * (and _content when not in external-content mode, but these indexes are
+	 * external-content, so _content does not exist). `DROP TABLE IF EXISTS`
+	 * is used so it's safe to call even if some shadow tables are missing.
+	 */
+	private async dropFtsShadowTables(collectionSlug: string): Promise<void> {
+		const ftsTable = this.getFtsTableName(collectionSlug);
+		for (const suffix of ["_config", "_data", "_docsize", "_idx", "_content"]) {
+			await sql
+				.raw(`DROP TABLE IF EXISTS "${ftsTable}${suffix}"`)
+				.execute(this.db)
+				.catch(() => {});
+		}
 	}
 
 	/**
